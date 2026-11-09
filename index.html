@@ -628,7 +628,7 @@ const daysPill = (l) => (l.days == null ? '<span class="plain-days">ไม่ม
 
 /* ================= server: Google Apps Script — google.script.run inside the /exec page, fetch from the GitHub Pages copy ================= */
 // สำเนาบน GitHub Pages: วางลิงก์ /exec ของ Apps Script ระหว่างเครื่องหมายคำพูด (ในไฟล์ Web ของ Apps Script ปล่อยว่างได้)
-const EXEC_URL = '';
+const EXEC_URL = 'https://script.google.com/macros/s/AKfycbx_dYqs0lV2s5qNSeiq6adMjNUlW9QmW8lUBbN4IWnmWIQI8DOLUcxqzHcacNAQX4VJoQ/exec';
 const inGas = !!(window.google && google.script && google.script.run);
 const LS = 'kkp-expiry-gas-v1';
 const prefs = (() => { try { return JSON.parse(localStorage.getItem(LS) || '{}') || {}; } catch { return {}; } })();
