@@ -276,7 +276,9 @@ dialog[open] { animation: dlg 180ms var(--ease-out); }
 .steps li { padding-left: 4px; line-height: 22px; }
 .steps li::marker { color: var(--muted); font-variant-numeric: tabular-nums; }
 .setting .input { width: 100%; max-width: 320px; }
-.foot-btn { justify-self: start; margin-left: -6px; height: 28px; color: var(--text); }
+.foot-acts { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-left: -6px; }
+.foot-btn { height: 32px; color: var(--text); }
+@media (max-width: 860px) { .foot-btn { height: 44px; font-size: 15px; } .side-foot { font-size: 13px; } }
 
 /* ---------- tablet and narrow desktop ---------- */
 @media (max-width: 1279px) {
@@ -730,7 +732,7 @@ function renderFoot() {
   const st = S.auth ? '' : S.loadErr ? `<span><span class="dot warn"></span>${esc(S.loadErr)}</span>`
     : S.fresh ? `<span><span class="dot on"></span>Google Sheet · อัปเดต${esc(fmtStamp(new Date(S.fresh).toISOString()))}</span>`
     : `<span><span class="dot"></span>กำลังโหลดข้อมูล…</span>`;
-  $('#side-foot').innerHTML = `${prefs.name ? `<span class="who">ผู้บันทึก: ${esc(prefs.name)}</span>` : ''}${st}${S.auth ? '' : '<button class="btn text sm foot-btn" type="button" data-act="reload">รีเฟรชข้อมูล</button>'}`;
+  $('#side-foot').innerHTML = `${prefs.name ? `<span class="who">ผู้บันทึก: ${esc(prefs.name)}</span>` : ''}${st}${S.owner && !S.auth ? '<span>เข้าใช้ในฐานะเจ้าของชีต ไม่ต้องใช้รหัสผ่าน</span>' : ''}${S.auth ? '' : `<div class="foot-acts"><button class="btn text sm foot-btn" type="button" data-act="reload">รีเฟรชข้อมูล</button>${S.owner ? '' : '<button class="btn text sm foot-btn" type="button" data-act="logout">ออกจากระบบ</button>'}</div>`}`;
   const m = S.stock.meta;
   if (m.shop) $('#shop-name').textContent = m.shop;
   $('#shop-branch').textContent = m.branch ? `สาขา${m.branch}` : 'เตือนวันหมดอายุ';
@@ -1079,7 +1081,7 @@ function viewImport() {
         <div class="setting"><span class="lbl" id="w-l">เตือนล่วงหน้า</span>${seg('ช่วงเตือน', [[30, '30 วัน'], [60, '60'], [90, '90'], [120, '120'], [180, '180']], S.settings.windowDays)}<p>ล็อตที่จะหมดอายุภายในช่วงนี้จะขึ้นในคิว “ต้องจัดการ”</p></div>
         <div class="setting"><span class="lbl">ปีที่แสดง</span>${seg('ปี', [['be', 'พ.ศ.'], ['ce', 'ค.ศ. (ตรงกับฉลากยา)']], S.settings.year)}</div>
         <div class="setting"><label for="name-f">ชื่อผู้บันทึกในเครื่องนี้</label><input class="input" id="name-f" maxlength="40" placeholder="ชื่อเล่นของคุณ" value="${esc(prefs.name || '')}" autocomplete="nickname"><p>แสดงในบันทึกการจัดการว่าใครเป็นคนทำ</p></div>
-        <div class="setting"><span class="lbl">ที่เก็บข้อมูล</span><p>${storeTxt}</p>${prefs.pin ? '<div><button class="btn sm" type="button" data-act="forget">ลืมรหัสผ่านในเครื่องนี้</button></div>' : ''}</div>
+        <div class="setting"><span class="lbl">ที่เก็บข้อมูล</span><p>${storeTxt}</p>${S.owner ? '' : '<div><button class="btn sm" type="button" data-act="logout">ออกจากระบบในเครื่องนี้</button></div>'}</div>
       </section>
     </div>
   </div>`;
@@ -1176,7 +1178,13 @@ document.addEventListener('click', async (e) => {
   else if (act === 'dlg-close') dlg.close();
   else if (act === 'rec-del') { const key = dlg.dataset.key; t.disabled = true; try { await removeAction(key); dlg.close(); toast('ลบบันทึกแล้ว ล็อตกลับไปที่คิว'); } catch (e) { if (handleErr(e)) { dlg.close(); render(); return; } t.disabled = false; $('#rec-msg').innerHTML = '<p class="err">ลบไม่สำเร็จ ลองอีกครั้ง</p>'; } }
   else if (act === 'reload') loadAll();
-  else if (act === 'forget') { delete prefs.pin; S.pin = ''; savePrefs(); try { localStorage.removeItem(LS + ':cache'); } catch {} toast('ลืมรหัสผ่านในเครื่องนี้แล้ว'); loadAll(); }
+  else if (act === 'logout') {
+    // ออกจากระบบในเครื่องนี้: ลืมรหัส ชื่อผู้บันทึก และข้อมูลร้านที่จำไว้ แล้วกลับไปหน้าใส่รหัส
+    S.pin = ''; delete prefs.pin; delete prefs.name; savePrefs();
+    try { localStorage.removeItem(LS + ':cache'); } catch {}
+    S.loaded = false; S.fresh = 0; S.stock = { meta: S.stock.meta, lots: [] }; S.actions = new Map(); S.imports = []; S.ui.preview = null; bump();
+    S.auth = { code: 'AUTH_REQUIRED', msg: '' }; closeMenu(); render(); toast('ออกจากระบบแล้ว');
+  }
   else if (act === 'ret-mode') { S.ui.retMode = t.dataset.mode; render(); }
   else if (act === 'ret-open') { S.ui.retOpen = S.ui.retOpen === t.dataset.sup ? '' : t.dataset.sup; render(); }
   else if (act === 'copy-ret') {
