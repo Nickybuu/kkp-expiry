@@ -458,6 +458,11 @@ function parseMeta(lines) {
   return meta;
 }
 const lotKey = (l) => `${l.code}|${l.stock}|${l.lot}`;
+// every recording is kept; a lot's state is its latest one
+function setActions(list) {
+  S.actionLog = (list || []).slice().sort((a, b) => (a.at || '').localeCompare(b.at || ''));
+  S.actions = new Map(); for (const a of S.actionLog) S.actions.set(a.key, a);
+}
 function parseRows(rows) {
   const hi = rows.findIndex((r) => r && r.some((c) => /วันหมดอายุ/.test(String(c))) && r.some((c) => /ชื่อสินค้า/.test(String(c))));
   if (hi < 0) throw new Error('ไม่พบหัวตาราง "ชื่อสินค้า" และ "วันหมดอายุ (EXP)" ในไฟล์ ตรวจว่าเป็นรายงานสรุปสินค้าคงคลังทั้งหมดจาก Arincare');
@@ -581,7 +586,7 @@ const KINDS = {
 };
 const S = {
   stock: { meta: {}, lots: [] }, loaded: false, auth: null, loadErr: '', pin: '', fresh: 0, owner: false,
-  source: 'seed', actions: new Map(), imports: [], settings: { windowDays: 90, year: 'be' },
+  source: 'seed', actions: new Map(), actionLog: [], imports: [], settings: { windowDays: 90, year: 'be' },
   canWrite: true,
   ui: { route: 'overview', qTab: null, lotsTab: 'todo', search: '', supplier: '', month: '', band: '', sort: 'exp', shown: 50, retMode: 'all', preview: null, importErr: '', busy: null },
 };
@@ -596,12 +601,15 @@ function derive() {
     const band = days == null ? 'noexp' : days < 0 ? 'expired' : days <= near ? 'd30' : days <= W ? 'dwin' : 'later';
     const action = S.actions.get(l.key) || null;
     let status;
-    if (action) status = action.kind === 'promo' ? (days != null && days < 0 ? 'todo' : 'track') : action.kind === 'pull' ? 'track' : 'cut';
+    // returned or destroyed part of the lot: once Arincare shows fewer units than were on hand, the rest needs a decision again
+    const had = action ? Number(action.snap && action.snap.qty) || 0 : 0;
+    const partial = action && (action.kind === 'return' || action.kind === 'destroy') && had > 0 && l.qty < had ? { kind: action.kind, had, left: l.qty } : null;
+    if (action && !partial) status = action.kind === 'promo' ? (days != null && days < 0 ? 'todo' : 'track') : action.kind === 'pull' ? 'track' : 'cut';
     else status = band === 'noexp' ? 'noexp' : band === 'later' ? 'ok' : 'todo';
-    return { ...l, days, band, action, status };
+    return { ...l, days, band, action, status, partial };
   });
   const inStock = new Set(lots.map((l) => l.key));
-  const history = [...S.actions.values()].sort((a, b) => (b.at || '').localeCompare(a.at || '')).map((a) => ({ ...a, inStock: inStock.has(a.key) }));
+  const history = [...S.actionLog].sort((a, b) => (b.at || '').localeCompare(a.at || '')).map((a) => ({ ...a, inStock: inStock.has(a.key) }));
   const sum = (arr) => arr.reduce((s, l) => s + l.value, 0);
   const todo = lots.filter((l) => l.status === 'todo');
   const bands = W > 30 ? ['expired', 'd30', 'dwin'] : ['expired', 'd30'];
@@ -660,11 +668,11 @@ function call(action, payload = {}) {
     .then((r) => (r && r.ok ? r.data : Promise.reject(r && r.code ? r : BAD_REPLY)));
 }
 function cacheNow() {
-  try { localStorage.setItem(LS + ':cache', JSON.stringify({ meta: S.stock.meta, lots: S.stock.lots.map(toCompact), actions: [...S.actions.values()], imports: S.imports, settings: S.settings, owner: S.owner })); } catch {}
+  try { localStorage.setItem(LS + ':cache', JSON.stringify({ meta: S.stock.meta, lots: S.stock.lots.map(toCompact), actions: S.actionLog, imports: S.imports, settings: S.settings, owner: S.owner })); } catch {}
 }
 function applyData(d, fromCache) {
   S.stock = { meta: d.meta || {}, lots: (d.lots || []).map(fromCompact) };
-  S.actions = new Map((d.actions || []).map((a) => [a.key, a]));
+  setActions(d.actions);
   S.imports = d.imports || [];
   Object.assign(S.settings, d.settings || {});
   S.owner = !!d.owner && inGas; S.loaded = true;
@@ -677,7 +685,7 @@ function handleErr(e) {
     S.auth = { code, msg: (e && e.error) || '' };
     if (code === 'AUTH_WRONG') { S.pin = ''; delete prefs.pin; savePrefs(); }
     // ข้อมูลร้านที่จำไว้ในเครื่องไม่แสดงให้คนที่ยังไม่ได้ใส่รหัส
-    if (code !== 'AUTH_NOTSET') { S.loaded = false; S.stock = { meta: S.stock.meta, lots: [] }; S.actions = new Map(); bump(); try { localStorage.removeItem(LS + ':cache'); } catch {} }
+    if (code !== 'AUTH_NOTSET') { S.loaded = false; S.stock = { meta: S.stock.meta, lots: [] }; setActions([]); bump(); try { localStorage.removeItem(LS + ':cache'); } catch {} }
     return true;
   }
   return false;
@@ -689,7 +697,7 @@ async function loadAll(quiet) {
   catch (e) { if (!handleErr(e)) S.loadErr = (e && e.error) || 'โหลดข้อมูลไม่สำเร็จ'; }
   S.busyLoad = false; render();
 }
-const APP_VERSION = '2026-11-09.4';
+const APP_VERSION = '2026-11-09.5';
 const onPages = /\.github\.io$/.test(location.hostname) || !!window.__forcePages;
 const reloadPage = () => (window.__reloadStub ? window.__reloadStub() : location.reload());
 async function checkVersion() {
@@ -712,12 +720,12 @@ function boot() {
 const who = (v) => v || '';
 async function saveActionsApi(items) {
   const d = await call('saveActions', { items });
-  S.actions = new Map(d.actions.map((a) => [a.key, a])); bump(); cacheNow(); render();
+  setActions(d.actions); bump(); cacheNow(); render();
 }
 async function saveAction(a) { return saveActionsApi([{ key: a.key, kind: a.kind, note: a.note, snap: a.snap }]); }
 async function removeAction(key) {
   const d = await call('deleteAction', { key });
-  S.actions = new Map(d.actions.map((a) => [a.key, a])); bump(); cacheNow(); render();
+  setActions(d.actions); bump(); cacheNow(); render();
 }
 async function saveSettings() {
   bump(); render();
@@ -775,17 +783,18 @@ function actionCell(l) {
   return `<button class="btn sm" type="button" data-act="record" data-key="${esc(l.key)}"${dis} aria-label="บันทึกการจัดการ ${esc(l.name)}">บันทึก</button>`;
 }
 function lotRow(l, mode) {
+  const part = l.partial ? ` · ${esc(KINDS[l.partial.kind].done)} ${int(l.partial.had - l.partial.left)} เหลือ ${int(l.partial.left)}` : '';
   const qty = `${int(l.qty)} <small>${esc(l.unit)}</small>`;
   const lotTxt = l.lot && l.lot !== '-' ? `ล็อต ${esc(l.lot)}` : `สต็อก ${esc(l.stock)}`;
   if (mode === 'ov') {
     return `<div class="lrow ov-cols" role="listitem">
-      <div class="c-id"><div class="name" title="${esc(l.name)}">${esc(l.name)}</div><div class="info">${lotTxt} · ${esc(l.supplier)}</div></div>
+      <div class="c-id"><div class="name" title="${esc(l.name)}">${esc(l.name)}</div><div class="info">${lotTxt} · ${esc(l.supplier)}${part}</div></div>
       <div class="c-st">${daysPill(l)}<span class="exp-sub">EXP ${fmtDate(l.exp)}</span></div>
       <div class="c-val n r">${baht(l.value)}<span class="sub">${int(l.qty)} ${esc(l.unit)}</span></div>
       <div class="c-act">${actionCell(l)}</div></div>`;
   }
   return `<div class="lrow full-cols" role="listitem">
-    <div class="c-id"><div class="name" title="${esc(l.name)}">${esc(l.name)}</div><div class="info">${esc(l.code)} · ${lotTxt}<span class="sup-ph"> · ${esc(l.supplier)}</span></div></div>
+    <div class="c-id"><div class="name" title="${esc(l.name)}">${esc(l.name)}</div><div class="info">${esc(l.code)} · ${lotTxt}<span class="sup-ph"> · ${esc(l.supplier)}</span>${part}</div></div>
     <div class="c-sup" title="${esc(l.supplier)}">${esc(l.supplier)}</div>
     <div class="c-exp n r">${fmtDate(l.exp)}</div>
     <div class="c-st r">${daysPill(l)}<span class="exp-sub">EXP ${fmtDate(l.exp)}</span></div>
@@ -1010,7 +1019,7 @@ function viewReturns() {
   const panels = groups.map((s, gi) => {
     const open = S.ui.retOpen === s.name;
     const rows = (open ? s.lots : s.lots.slice(0, 6)).map((l) => `<div class="lrow" role="listitem">
-      <div class="c-id"><div class="name" title="${esc(l.name)}">${esc(l.name)}</div><div class="info">${esc(l.code)}${l.action ? ' · ' + esc(KINDS[l.action.kind].done) : ''}<span class="ph"> · ล็อต ${esc(l.lot)}</span></div></div>
+      <div class="c-id"><div class="name" title="${esc(l.name)}">${esc(l.name)}</div><div class="info">${esc(l.code)}${l.partial ? ` · ${esc(KINDS[l.partial.kind].done)} ${int(l.partial.had - l.partial.left)} เหลือ ${int(l.partial.left)}` : l.action ? ' · ' + esc(KINDS[l.action.kind].done) : ''}<span class="ph"> · ล็อต ${esc(l.lot)}</span></div></div>
       <div class="c-lot n">ล็อต ${esc(l.lot)}</div>
       <div class="c-st r">${daysPill(l)}<span class="exp-sub">EXP ${fmtDate(l.exp)}</span></div>
       <div class="c-qty n r">${int(l.qty)} <small>${esc(l.unit)}</small></div>
@@ -1041,10 +1050,15 @@ function returnText(name) {
 /* ---------- import + settings ---------- */
 function diffAgainst(lots) {
   const prev = new Map(S.stock.lots.map((l) => [l.key, l])); const next = new Set(lots.map((l) => l.key));
-  let added = 0, changed = 0, removed = 0, closed = 0;
+  let added = 0, changed = 0, removed = 0, closed = 0, unrecorded = 0;
+  const W = S.settings.windowDays;
   for (const l of lots) { const p = prev.get(l.key); if (!p) added++; else if (p.qty !== l.qty) changed++; }
-  for (const k of prev.keys()) if (!next.has(k)) { removed++; const a = S.actions.get(k); if (a && a.kind !== 'promo') closed++; }
-  return { added, changed, removed, closed, total: lots.reduce((s, l) => s + l.value, 0) };
+  for (const [k, p] of prev) if (!next.has(k)) {
+    removed++; const a = S.actions.get(k);
+    if (a && a.kind !== 'promo') closed++;
+    else if (!a) { const d = daysTo(p.exp); if (d != null && d <= W) unrecorded++; }
+  }
+  return { added, changed, removed, closed, unrecorded, total: lots.reduce((s, l) => s + l.value, 0) };
 }
 function importBox() {
   const m = S.stock.meta, P = S.ui.preview, dis = S.canWrite ? '' : ' disabled';
@@ -1063,6 +1077,7 @@ function importBox() {
         <dt>จำนวนล็อต</dt><dd>${int(P.lots.length)}${okCount}</dd>
         <dt>มูลค่าทุนรวม</dt><dd>${baht(P.sum.total)}${okTotal}</dd>
         <dt>เทียบกับข้อมูลที่ใช้อยู่</dt><dd>ใหม่ ${int(P.sum.added)} · หายไป ${int(P.sum.removed)} · จำนวนเปลี่ยน ${int(P.sum.changed)}</dd>
+        ${P.sum.unrecorded ? `<dt>หายไปโดยไม่มีบันทึก</dt><dd>${int(P.sum.unrecorded)} ล็อต<span class="ok" style="color:var(--muted)">หมดอายุหรือใกล้หมด อาจขายหมด หรือคืน/ทำลายใน Arincare ไปก่อนบันทึกในเว็บ</span></dd>` : ''}
         <dt>งานที่จะปิดอัตโนมัติ</dt><dd>${int(P.sum.closed)} ล็อต<span class="ok" style="color:var(--muted)">บันทึกส่งคืน/ทำลายแล้ว และไม่มีในไฟล์ใหม่</span></dd>
       </dl>
       ${noexp || P.skipped || P.badExp ? `<p class="meta" style="margin-top:10px;font-size:13px">${noexp ? `${int(noexp)} รายการไม่มีวันหมดอายุในไฟล์ จะไม่ถูกนำมาเตือน` : ''}${P.skipped ? ` · ข้าม ${int(P.skipped)} แถวที่คงเหลือ 0` : ''}${P.badExp ? ` · ${int(P.badExp)} แถวอ่านวันหมดอายุไม่ได้` : ''}</p>` : ''}
@@ -1117,7 +1132,7 @@ async function handleFile(file) {
 const dlg = $('#dlg');
 function openRecord(key) {
   const D = derive(); const l = D.lots.find((x) => x.key === key); if (!l) return;
-  const cur = l.action;
+  const cur = l.partial ? null : l.action;
   const def = cur ? cur.kind : l.days != null && l.days < 0 ? 'pull' : 'promo';
   const kinds = Object.keys(KINDS).filter((k) => k !== 'promo' || (l.days != null && l.days >= 0) || (cur && cur.kind === 'promo'));
   const opts = kinds.map((k) => `<label class="opt"><input type="radio" name="kind" value="${k}"${k === def ? ' checked' : ''}><b>${k === 'return' ? 'ส่งคืน ' + esc(l.supplier) : KINDS[k].label}</b>${KINDS[k].hint ? `<small>${KINDS[k].hint}</small>` : '<small>แล้วตัดสต็อกใน Arincare</small>'}</label>`).join('');
@@ -1128,6 +1143,7 @@ function openRecord(key) {
     <fieldset><legend class="vh">การจัดการ</legend><div class="opts">${opts}</div></fieldset>
     <div class="field"><label for="rec-by">ผู้บันทึก</label><input class="input" id="rec-by" maxlength="40" required placeholder="ชื่อเล่นของคุณ" value="${esc(prefs.name || '')}" autocomplete="nickname"></div>
     <div class="field"><label for="rec-note">หมายเหตุ (ถ้ามี)</label><input class="input" id="rec-note" maxlength="120" placeholder="เช่น ลด 20% หรือ เลขใบส่งคืน" value="${esc(cur ? cur.note || '' : '')}"></div>
+    ${l.partial ? `<p class="prev">${esc(KINDS[l.partial.kind].done)}ไว้ ${int(l.partial.had)} ${esc(l.unit)} เมื่อ${esc(fmtStamp(l.action.at))}${who(l.action.by) ? ' โดย ' + esc(who(l.action.by)) : ''} ไฟล์ล่าสุดยังเหลือ ${int(l.partial.left)} ${esc(l.unit)} บันทึกการจัดการสำหรับส่วนที่เหลือ</p>` : ''}
     ${cur ? `<p class="prev">บันทึกไว้ ${esc(fmtStamp(cur.at))}${who(cur.by) ? ' โดย ' + esc(who(cur.by)) : ''}: ${esc(KINDS[cur.kind].done)}</p>` : ''}
     <div class="msg" id="rec-msg" role="alert"></div>
     <div class="dlg-foot">${cur ? '<button class="btn text danger" type="button" data-act="rec-del">ลบบันทึก</button>' : ''}<span class="grow"></span><button class="btn" type="button" data-act="dlg-close">ยกเลิก</button><button class="btn primary" type="submit">บันทึก</button></div>
@@ -1198,7 +1214,7 @@ document.addEventListener('click', async (e) => {
     // ออกจากระบบในเครื่องนี้: ลืมรหัส ชื่อผู้บันทึก และข้อมูลร้านที่จำไว้ แล้วกลับไปหน้าใส่รหัส
     S.pin = ''; delete prefs.pin; delete prefs.name; savePrefs();
     try { localStorage.removeItem(LS + ':cache'); } catch {}
-    S.loaded = false; S.fresh = 0; S.stock = { meta: S.stock.meta, lots: [] }; S.actions = new Map(); S.imports = []; S.ui.preview = null; bump();
+    S.loaded = false; S.fresh = 0; S.stock = { meta: S.stock.meta, lots: [] }; setActions([]); S.imports = []; S.ui.preview = null; bump();
     S.auth = { code: 'AUTH_REQUIRED', msg: '' }; closeMenu(); render(); toast('ออกจากระบบแล้ว');
   }
   else if (act === 'ret-mode') { S.ui.retMode = t.dataset.mode; render(); }
