@@ -667,7 +667,7 @@ function applyData(d, fromCache) {
   S.actions = new Map((d.actions || []).map((a) => [a.key, a]));
   S.imports = d.imports || [];
   Object.assign(S.settings, d.settings || {});
-  S.owner = !!d.owner; S.loaded = true;
+  S.owner = !!d.owner && inGas; S.loaded = true;
   if (!fromCache) { S.fresh = Date.now(); cacheNow(); }
   bump();
 }
@@ -689,7 +689,22 @@ async function loadAll(quiet) {
   catch (e) { if (!handleErr(e)) S.loadErr = (e && e.error) || 'โหลดข้อมูลไม่สำเร็จ'; }
   S.busyLoad = false; render();
 }
+const APP_VERSION = '2026-11-09.4';
+const onPages = /\.github\.io$/.test(location.hostname) || !!window.__forcePages;
+const reloadPage = () => (window.__reloadStub ? window.__reloadStub() : location.reload());
+async function checkVersion() {
+  if (!onPages) return;
+  try {
+    const r = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+    const v = r.ok ? (await r.json()).version : '';
+    if (!v || v === APP_VERSION) { S.newVersion = ''; return; }
+    const tried = sessionStorage.getItem('kkp-reload-for');
+    if (tried !== v && !document.querySelector('dialog[open]') && !S.ui.busy && !S.ui.preview) { sessionStorage.setItem('kkp-reload-for', v); reloadPage(); return; }
+    S.newVersion = v; renderFoot();
+  } catch { /* offline: keep the page as it is */ }
+}
 function boot() {
+  checkVersion();
   S.pin = prefs.pin || '';
   try { const c = JSON.parse(localStorage.getItem(LS + ':cache') || 'null'); if (c && Array.isArray(c.lots)) applyData(c, true); } catch {}
   route(); loadAll();
@@ -713,7 +728,7 @@ async function commitImport(parsed) {
   const d = await call('import', { meta: parsed.meta, fileName: parsed.fileName, lots: parsed.lots.map(toCompact) });
   applyData(d);
 }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.loaded && !S.auth && Date.now() - (S.fresh || 0) > 60000) loadAll(true); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible') return; checkVersion(); if (S.loaded && !S.auth && Date.now() - (S.fresh || 0) > 60000) loadAll(true); });
 
 /* ================= rendering ================= */
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -732,7 +747,7 @@ function renderFoot() {
   const st = S.auth ? '' : S.loadErr ? `<span><span class="dot warn"></span>${esc(S.loadErr)}</span>`
     : S.fresh ? `<span><span class="dot on"></span>Google Sheet · อัปเดต${esc(fmtStamp(new Date(S.fresh).toISOString()))}</span>`
     : `<span><span class="dot"></span>กำลังโหลดข้อมูล…</span>`;
-  $('#side-foot').innerHTML = `${prefs.name ? `<span class="who">ผู้บันทึก: ${esc(prefs.name)}</span>` : ''}${st}${S.owner && !S.auth ? '<span>เข้าใช้ในฐานะเจ้าของชีต ไม่ต้องใช้รหัสผ่าน</span>' : ''}${S.auth ? '' : `<div class="foot-acts"><button class="btn text sm foot-btn" type="button" data-act="reload">รีเฟรชข้อมูล</button>${S.owner ? '' : '<button class="btn text sm foot-btn" type="button" data-act="logout">ออกจากระบบ</button>'}</div>`}`;
+  $('#side-foot').innerHTML = `${prefs.name ? `<span class="who">ผู้บันทึก: ${esc(prefs.name)}</span>` : ''}${st}${S.newVersion ? '<span><span class="dot warn"></span>มีหน้าเว็บรุ่นใหม่ <button class="btn text sm foot-btn" type="button" data-act="reload-page">โหลดรุ่นใหม่</button></span>' : ''}${S.owner && !S.auth ? '<span>เข้าใช้ในฐานะเจ้าของชีต ไม่ต้องใช้รหัสผ่าน</span>' : ''}${S.auth ? '' : `<div class="foot-acts"><button class="btn text sm foot-btn" type="button" data-act="reload">รีเฟรชข้อมูล</button>${S.owner ? '' : '<button class="btn text sm foot-btn" type="button" data-act="logout">ออกจากระบบ</button>'}</div>`}`;
   const m = S.stock.meta;
   if (m.shop) $('#shop-name').textContent = m.shop;
   $('#shop-branch').textContent = m.branch ? `สาขา${m.branch}` : 'เตือนวันหมดอายุ';
@@ -1081,7 +1096,7 @@ function viewImport() {
         <div class="setting"><span class="lbl" id="w-l">เตือนล่วงหน้า</span>${seg('ช่วงเตือน', [[30, '30 วัน'], [60, '60'], [90, '90'], [120, '120'], [180, '180']], S.settings.windowDays)}<p>ล็อตที่จะหมดอายุภายในช่วงนี้จะขึ้นในคิว “ต้องจัดการ”</p></div>
         <div class="setting"><span class="lbl">ปีที่แสดง</span>${seg('ปี', [['be', 'พ.ศ.'], ['ce', 'ค.ศ. (ตรงกับฉลากยา)']], S.settings.year)}</div>
         <div class="setting"><label for="name-f">ชื่อผู้บันทึกในเครื่องนี้</label><input class="input" id="name-f" maxlength="40" placeholder="ชื่อเล่นของคุณ" value="${esc(prefs.name || '')}" autocomplete="nickname"><p>แสดงในบันทึกการจัดการว่าใครเป็นคนทำ</p></div>
-        <div class="setting"><span class="lbl">ที่เก็บข้อมูล</span><p>${storeTxt}</p>${S.owner ? '' : '<div><button class="btn sm" type="button" data-act="logout">ออกจากระบบในเครื่องนี้</button></div>'}</div>
+        <div class="setting"><span class="lbl">ที่เก็บข้อมูล</span><p>${storeTxt}</p><p>หน้าเว็บรุ่น ${APP_VERSION}${inGas ? ' (เปิดผ่าน Apps Script)' : ''}</p>${S.owner ? '' : '<div><button class="btn sm" type="button" data-act="logout">ออกจากระบบในเครื่องนี้</button></div>'}</div>
       </section>
     </div>
   </div>`;
@@ -1178,6 +1193,7 @@ document.addEventListener('click', async (e) => {
   else if (act === 'dlg-close') dlg.close();
   else if (act === 'rec-del') { const key = dlg.dataset.key; t.disabled = true; try { await removeAction(key); dlg.close(); toast('ลบบันทึกแล้ว ล็อตกลับไปที่คิว'); } catch (e) { if (handleErr(e)) { dlg.close(); render(); return; } t.disabled = false; $('#rec-msg').innerHTML = '<p class="err">ลบไม่สำเร็จ ลองอีกครั้ง</p>'; } }
   else if (act === 'reload') loadAll();
+  else if (act === 'reload-page') reloadPage();
   else if (act === 'logout') {
     // ออกจากระบบในเครื่องนี้: ลืมรหัส ชื่อผู้บันทึก และข้อมูลร้านที่จำไว้ แล้วกลับไปหน้าใส่รหัส
     S.pin = ''; delete prefs.pin; delete prefs.name; savePrefs();
@@ -1232,7 +1248,7 @@ window.addEventListener('hashchange', route);
 let rz; new ResizeObserver(() => { clearTimeout(rz); rz = setTimeout(() => { if (S.ui.route === 'overview') drawRunway($('#runway')); }, 80); }).observe(main);
 if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (S.ui.route === 'overview') drawRunway($('#runway')); });
 
-window.__app = { S, parseRows, readXlsx, readCsv, derive, diffAgainst, normExp, returnText, lotKey, call, prefs };
+window.__app = { S, checkVersion, APP_VERSION, parseRows, readXlsx, readCsv, derive, diffAgainst, normExp, returnText, lotKey, call, prefs };
 bump(); boot();
 })();
 </script>
