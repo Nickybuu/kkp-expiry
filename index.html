@@ -188,6 +188,7 @@ button.srow:hover b:first-child { text-decoration: underline; text-underline-off
 .act-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; padding: 9px 0; }
 .act-row + .act-row { border-top: 1px solid var(--rule); }
 .act-row .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.act-row .t .meta { white-space: normal; }
 
 /* ---------- runway chart ---------- */
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: var(--fs-small); color: var(--muted); }
@@ -668,14 +669,14 @@ function call(action, payload = {}) {
     .then((r) => (r && r.ok ? r.data : Promise.reject(r && r.code ? r : BAD_REPLY)));
 }
 function cacheNow() {
-  try { localStorage.setItem(LS + ':cache', JSON.stringify({ meta: S.stock.meta, lots: S.stock.lots.map(toCompact), actions: S.actionLog, imports: S.imports, settings: S.settings, owner: S.owner })); } catch {}
+  try { localStorage.setItem(LS + ':cache', JSON.stringify({ meta: S.stock.meta, lots: S.stock.lots.map(toCompact), actions: S.actionLog, imports: S.imports, settings: S.settings, owner: S.owner, auto: S.auto })); } catch {}
 }
 function applyData(d, fromCache) {
   S.stock = { meta: d.meta || {}, lots: (d.lots || []).map(fromCompact) };
   setActions(d.actions);
   S.imports = d.imports || [];
   Object.assign(S.settings, d.settings || {});
-  S.owner = !!d.owner && inGas; S.loaded = true;
+  S.owner = !!d.owner && inGas; S.loaded = true; S.auto = d.auto || null;
   if (!fromCache) { S.fresh = Date.now(); cacheNow(); }
   bump();
 }
@@ -697,7 +698,7 @@ async function loadAll(quiet) {
   catch (e) { if (!handleErr(e)) S.loadErr = (e && e.error) || 'โหลดข้อมูลไม่สำเร็จ'; }
   S.busyLoad = false; render();
 }
-const APP_VERSION = '2026-11-09.5';
+const APP_VERSION = '2026-11-10.1';
 const onPages = /\.github\.io$/.test(location.hostname) || !!window.__forcePages;
 const reloadPage = () => (window.__reloadStub ? window.__reloadStub() : location.reload());
 async function checkVersion() {
@@ -736,6 +737,11 @@ async function commitImport(parsed) {
   const d = await call('import', { meta: parsed.meta, fileName: parsed.fileName, lots: parsed.lots.map(toCompact) });
   applyData(d);
 }
+setInterval(() => {
+  if (document.visibilityState !== 'visible' || !S.loaded || S.auth || !S.auto || !S.auto.on) return;
+  if (document.querySelector('dialog[open]') || S.ui.busy || S.ui.preview) return;
+  if (Date.now() - (S.fresh || 0) > 4.5 * 60000) loadAll(true);
+}, 60000);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState !== 'visible') return; checkVersion(); if (S.loaded && !S.auth && Date.now() - (S.fresh || 0) > 60000) loadAll(true); });
 
 /* ================= rendering ================= */
@@ -747,13 +753,16 @@ function stampHtml() {
   const m = S.stock.meta;
   if (!m.reportDate) return '';
   const age = -daysTo(m.reportDate);
-  const src = '';
+  const a = S.auto, last = a && a.last;
+  const failedLater = a && a.on && last && !last.ok && !last.retry && (!m.importedAt || last.at > m.importedAt);
+  const src = m.by && /^อัตโนมัติ/.test(m.by) ? `<span class="d-only"> · นำเข้าอัตโนมัติ${m.importedAt ? ' ' + esc(fmtStamp(m.importedAt).replace('วันนี้ ', '')) : ''}</span>` : '';
+  if (failedLater) return `<a class="stamp stale" href="#import">ข้อมูล ณ ${fmtDate(m.reportDate)} · นำเข้าอัตโนมัติรอบล่าสุดไม่สำเร็จ ดูเหตุผล</a>`;
   if (age > 7) return `<span class="stamp stale">ข้อมูล<span class="d-only"> Arincare</span> ณ ${fmtDate(m.reportDate)} (${int(age)} วันก่อน)${src}</span>`;
   return `<span class="stamp">ข้อมูล<span class="d-only"> Arincare</span> ณ ${fmtDate(m.reportDate)}${src}</span>`;
 }
 function renderFoot() {
   const st = S.auth ? '' : S.loadErr ? `<span><span class="dot warn"></span>${esc(S.loadErr)}</span>`
-    : S.fresh ? `<span><span class="dot on"></span>Google Sheet · อัปเดต${esc(fmtStamp(new Date(S.fresh).toISOString()))}</span>`
+    : S.fresh ? `<span><span class="dot on"></span>Google Sheet · อัปเดต ${esc(fmtStamp(new Date(S.fresh).toISOString()))}</span>`
     : `<span><span class="dot"></span>กำลังโหลดข้อมูล…</span>`;
   $('#side-foot').innerHTML = `${prefs.name ? `<span class="who">ผู้บันทึก: ${esc(prefs.name)}</span>` : ''}${st}${S.newVersion ? '<span><span class="dot warn"></span>มีหน้าเว็บรุ่นใหม่ <button class="btn text sm foot-btn" type="button" data-act="reload-page">โหลดรุ่นใหม่</button></span>' : ''}${S.owner && !S.auth ? '<span>เข้าใช้ในฐานะเจ้าของชีต ไม่ต้องใช้รหัสผ่าน</span>' : ''}${S.auth ? '' : `<div class="foot-acts"><button class="btn text sm foot-btn" type="button" data-act="reload">รีเฟรชข้อมูล</button>${S.owner ? '' : '<button class="btn text sm foot-btn" type="button" data-act="logout">ออกจากระบบ</button>'}</div>`}`;
   const m = S.stock.meta;
@@ -1093,6 +1102,19 @@ function importBox() {
   }
   return box;
 }
+function autoPanel() {
+  const a = S.auto;
+  if (!a || !a.on) return `<section class="panel" aria-labelledby="a-h"><header><h2 id="a-h">นำเข้าอัตโนมัติจาก Google Drive</h2><span class="meta">ยังไม่ได้เปิด</span></header>
+    <p class="meta" style="font-size:14px;line-height:22px">เมื่อเปิดแล้ว แค่บันทึกไฟล์ Excel จาก Arincare ลงโฟลเดอร์ “Arincare นำเข้าอัตโนมัติ” ใน Google Drive ระบบจะนำเข้าเองทุก 10 นาที เจ้าของชีตเปิดได้ที่เมนู “เตือนยาหมดอายุ” → “เปิดนำเข้าอัตโนมัติจาก Google Drive” ในชีต</p></section>`;
+  const l = a.last;
+  let lastHtml = '<p class="meta">ยังไม่มีไฟล์เข้ามาในโฟลเดอร์</p>';
+  if (l && l.ok) lastHtml = `<dl class="kv"><dt>ล่าสุด</dt><dd>นำเข้าแล้ว ${int(l.rows)} ล็อต<span class="ok">${esc(fmtStamp(l.at))}</span></dd><dt>ไฟล์</dt><dd>${esc(l.file)}</dd>${l.reportDate ? `<dt>ข้อมูล ณ</dt><dd>${fmtDate(l.reportDate)}</dd>` : ''}<dt>เทียบกับก่อนหน้า</dt><dd>ใหม่ ${int(l.added)} · หายไป ${int(l.removed)} · จำนวนเปลี่ยน ${int(l.changed)}</dd></dl>`;
+  else if (l && l.retry) lastHtml = `<p class="warnbox">กำลังลองนำเข้า ${esc(l.file)} อีกครั้งในรอบถัดไป (${esc(l.msg)})</p>`;
+  else if (l) lastHtml = `<div class="warnbox"><b>ไม่ได้นำเข้า ${esc(l.file)}</b><br>${esc(l.msg)}<br>ไฟล์ถูกย้ายไปโฟลเดอร์ย่อย “นำเข้าไม่ได้” · ${esc(fmtStamp(l.at))}</div>`;
+  return `<section class="panel" aria-labelledby="a-h"><header><h2 id="a-h">นำเข้าอัตโนมัติจาก Google Drive</h2><span class="meta"><span class="dot on"></span>เปิดอยู่ · ตรวจทุก ${int(a.every || 10)} นาที</span></header>
+    ${lastHtml}
+    <div class="row-actions" style="justify-content:space-between;align-items:center"><span class="meta">บันทึกไฟล์จาก Arincare ลงโฟลเดอร์ “Arincare นำเข้าอัตโนมัติ”</span>${a.url ? `<a class="btn sm" href="${esc(a.url)}" target="_blank" rel="noopener">เปิดโฟลเดอร์</a>` : ''}</div></section>`;
+}
 function viewImport() {
   const D = derive(), m = S.stock.meta, P = S.ui.preview, dis = S.canWrite ? '' : ' disabled';
   const box = importBox();
@@ -1100,10 +1122,11 @@ function viewImport() {
   const seg = (name, opts, cur) => `<div class="segmented" role="group" aria-label="${name}">${opts.map(([v, t]) => `<button type="button" data-act="set" data-k="${name === 'ช่วงเตือน' ? 'windowDays' : 'year'}" data-v="${v}" aria-pressed="${String(v) === String(cur)}"${dis}>${t}</button>`).join('')}</div>`;
   const storeTxt = 'ข้อมูลเก็บใน Google Sheet ของร้าน แผ่นงาน คลังล่าสุด, บันทึกการจัดการ, ประวัติการนำเข้า และ ตั้งค่า ทุกเครื่องเห็นชุดเดียวกัน อีเมลสรุปรายสัปดาห์ตั้งได้จากเมนู “เตือนยาหมดอายุ” ในชีต';
   return `
-  <div class="title-row"><div><h1>นำเข้าและตั้งค่า</h1><p class="sub">ข้อมูลที่ใช้อยู่: ${fmtDate(m.reportDate)} · ${int(D.lots.length)} ล็อต · ทุน ${baht(D.total)}${m.importedAt ? ` · นำเข้า${esc(fmtStamp(m.importedAt))}${m.by ? ' โดย ' + esc(m.by) : ''}` : ''}</p></div><div class="title-actions">${stampHtml()}</div></div>
+  <div class="title-row"><div><h1>นำเข้าและตั้งค่า</h1><p class="sub">ข้อมูลที่ใช้อยู่: ${fmtDate(m.reportDate)} · ${int(D.lots.length)} ล็อต · ทุน ${baht(D.total)}${m.importedAt ? ` · นำเข้า ${esc(fmtStamp(m.importedAt))}${m.by ? ' โดย ' + esc(m.by) : ''}` : ''}</p></div><div class="title-actions">${stampHtml()}</div></div>
   <div class="imp">
     <div class="main">
       <section class="panel" aria-labelledby="i-h"><header><h2 id="i-h">${P ? 'ตรวจไฟล์ก่อนนำเข้า' : 'นำเข้าไฟล์ใหม่'}</h2><span class="meta">ไฟล์ใหม่จะแทนที่ข้อมูลคลังเดิมทั้งหมด การบันทึกที่ทำไว้จะยังอยู่</span></header>${box}</section>
+      ${autoPanel()}
     </div>
     <div class="aside">
       <section class="panel" aria-labelledby="h-h"><header><h2 id="h-h">ประวัติการนำเข้า</h2></header>${hist || '<p class="meta" style="font-size:13px;line-height:20px">ยังไม่มีการนำเข้า</p>'}</section>
